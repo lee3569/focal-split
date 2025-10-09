@@ -23,7 +23,7 @@ def simulation(target_size=512):
         pinhole_image = cv2.resize(pinhole_image, (new_w, new_h))
         print(f"Resized: ({h}, {w}) -> ({new_h}, {new_w})")
 
-    true_depth_z = 0.8
+    true_depth_z = 0.2
 
     psf1 = optics.create_psf(const.APERTURE, const.FOCAL_LENGTH, const.S1, true_depth_z, const.PIXEL_PITCH)
     psf2 = optics.create_psf(const.APERTURE, const.FOCAL_LENGTH, const.S2, true_depth_z, const.PIXEL_PITCH)
@@ -61,7 +61,7 @@ def simulation(target_size=512):
     plt.axis('off')
     
     plt.tight_layout()
-    plt.savefig("simulation_result.png", dpi=300, bbox_inches='tight')
+    plt.savefig("simulation_result1.png", dpi=300, bbox_inches='tight')
     plt.show()
 
 if __name__ == '__main__':
