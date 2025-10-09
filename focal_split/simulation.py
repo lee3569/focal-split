@@ -61,6 +61,7 @@ def simulation(target_size=512):
     plt.axis('off')
     
     plt.tight_layout()
+    plt.savefig("simulation_result.png", dpi=300, bbox_inches='tight')
     plt.show()
 
 if __name__ == '__main__':
