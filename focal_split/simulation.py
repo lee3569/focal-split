@@ -30,6 +30,7 @@ def run_simulation_final_fix(max_samples=50, crop=util.CROP_DEFAULT):
     all_pixels_pred = []
     
     WINDOW_SIZE = 21
+    DEPTH_SWEEP = np.linspace(0.1, 0.7, 30)
 
     cols = 10
     rows = math.ceil(len(data) / cols)
@@ -39,48 +40,73 @@ def run_simulation_final_fix(max_samples=50, crop=util.CROP_DEFAULT):
     max_conf_found = 0.0
 
     for idx, sample in enumerate(data):
+        I1_rgb, I2_rgb, _ = util.dataset_sample_to_images_and_depth(sample)
         try:
-            I1_rgb, I2_rgb, Ztrue = util.dataset_sample_to_images_and_depth(sample)
-            I1 = imaging.to_gray(I1_rgb)
-            I2 = imaging.to_gray(I2_rgb)
-            I1c, I2c = util.align_images(I1, I2, crop=crop)
-            I1c = imaging.highpass_filter(I1c); I2c = imaging.highpass_filter(I2c)
-            
-            conf_map = compute_confidence(I1c)
+            for Ztrue in DEPTH_SWEEP:
 
-            lap_I, It = oper.compute_laplacian_and_It(I1c, I2c)
-            numerator = lap_I
-            denominator = const.A_CALIB * lap_I + const.B_CALIB * It
-            
-            num_blur = cv2.boxFilter(numerator, -1, (WINDOW_SIZE, WINDOW_SIZE))
-            den_blur = cv2.boxFilter(denominator, -1, (WINDOW_SIZE, WINDOW_SIZE))
-            
-            depth_map = np.divide(num_blur, den_blur + 1e-10)
-            
-            h, w = depth_map.shape
-            margin = 30
-            patch_depth = depth_map[h//2-margin:h//2+margin, w//2-margin:w//2+margin]
-            patch_conf  = conf_map[h//2-margin:h//2+margin, w//2-margin:w//2+margin]
-            
-            flat_depth = patch_depth.flatten()
-            flat_conf = patch_conf.flatten()
-            
-            if flat_conf.max() > max_conf_found:
-                max_conf_found = flat_conf.max()
-            
+                I2 = imaging.to_gray(I2_rgb)
+                I1c, I2c = util.align_images(I1, I2, crop=crop)
+                # I1c = imaging.highpass_filter(I1c); I2c = imaging.highpass_filter(I2c)
+                
+                conf_map = compute_confidence(I1c)
 
-            valid_mask = (flat_depth > 0.0) & (flat_depth < 5.0) & (flat_conf > 0.05)
-            
-            valid_pixels = flat_depth[valid_mask]
-            
-            if len(valid_pixels) > 0:
-                all_pixels_pred.extend(valid_pixels)
-                all_pixels_true.extend([Ztrue] * len(valid_pixels))
-            
-            ax = axes_flat[idx]
-            im = ax.imshow(depth_map, cmap="inferno", vmin=0.0, vmax=2.0)
-            ax.set_title(f"#{idx}\nTrue: {Ztrue:.2f}m", fontsize=9)
-            ax.axis('off')
+                lap_I, It = oper.compute_laplacian_and_It(I1c, I2c, kernel_size=21, sigma=1.0)
+                # depth_map = depth.calculate_depth_map(It, lap_I, window=21)
+                # denominator = const.A_CALIB * lap_I + const.B_CALIB * It
+                
+                # num_blur = cv2.boxFilter(lap_I, -1, (WINDOW_SIZE, WINDOW_SIZE))
+                # den_blur = cv2.boxFilter(denominator, -1, (WINDOW_SIZE, WINDOW_SIZE))
+                
+                # depth_map = np.divide(num_blur, den_blur + 1e-10)
+                V = const.A_CALIB * lap_I
+                W = const.B_CALIB * lap_I + It
+
+                VW = cv2.boxFilter(V * W, -1, (WINDOW_SIZE, WINDOW_SIZE))
+                W2 = cv2.boxFilter(W * W, -1, (WINDOW_SIZE, WINDOW_SIZE))
+
+                depth_map = VW / (W2 + 1e-10)
+
+                # V = const.A_CALIB * lap_I
+                # W = const.B_CALIB * lap_I + It
+
+                # VW = V * W
+                # W2 = W * W
+
+                # VW_blur = cv2.boxFilter(VW, -1, (WINDOW_SIZE, WINDOW_SIZE))
+                # W2_blur = cv2.boxFilter(W2, -1, (WINDOW_SIZE, WINDOW_SIZE))
+
+                # depth_map = np.divide(
+                #     VW_blur,
+                #     W2_blur + 1e-10,
+                #     out=np.zeros_like(VW_blur),
+                #     where=W2_blur > 0
+                # )
+
+
+                h, w = depth_map.shape
+                margin = 30
+                patch_depth = depth_map[h//2-margin:h//2+margin, w//2-margin:w//2+margin]
+                patch_conf  = conf_map[h//2-margin:h//2+margin, w//2-margin:w//2+margin]
+                
+                flat_depth = patch_depth.flatten()
+                flat_conf = patch_conf.flatten()
+                
+                if flat_conf.max() > max_conf_found:
+                    max_conf_found = flat_conf.max()
+                
+
+                valid_mask = (flat_depth > 0.0) & (flat_depth < 5.0) & (flat_conf > 0.05)
+                
+                valid_pixels = flat_depth[valid_mask]
+                
+                if len(valid_pixels) > 0:
+                    all_pixels_pred.extend(valid_pixels)
+                    all_pixels_true.extend([Ztrue] * len(valid_pixels))
+                
+                ax = axes_flat[idx]
+                im = ax.imshow(depth_map, cmap="inferno", vmin=0.0, vmax=2.0)
+                ax.set_title(f"#{idx}\nTrue: {Ztrue:.2f}m", fontsize=9)
+                ax.axis('off')
 
         except Exception as e:
             if idx < len(axes_flat): axes_flat[idx].axis('off')
@@ -119,7 +145,7 @@ def run_simulation_final_fix(max_samples=50, crop=util.CROP_DEFAULT):
         out_file = "final_heatmap_filtered.png"
         plt.savefig(out_file)
         plt.close()
-        print(f"[Success] 히트맵 저장 완료: {out_file}")
+        print(f" {out_file}")
     else:
         print("[Error] 0.05로 낮췄는데도 데이터가 없습니다. 원본 이미지가 너무 어두운가 봅니다.")
 

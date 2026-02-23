@@ -1,22 +1,32 @@
 import numpy as np
+import cv2
 import constants as const
 
-def calculate_depth_map(It: np.ndarray, lap_I: np.ndarray,
-                        A: float | None = None,
-                        B: float | None = None,
-                        eps: float = 1e-10) -> np.ndarray:
+EPS = 1e-10
+
+def calculate_depth_map(It: np.ndarray,
+                        lap_I: np.ndarray,
+                        window: int = 21,
+                        A: float = None,
+                        B: float = None) -> np.ndarray:
     """
-    Eq. 11:
-        Z(x) = ∇²I / (A ∇²I + B I_t)
-
+    Junjie / paper-style aggregated estimator:
+      V = lap
+      W = A*lap + B*It
+      Z = box(V*W) / (box(W^2) + eps)
     """
-    if A is None:
-        A = const.A_CALIB
-    if B is None:
-        B = const.B_CALIB
+    if A is None: A = const.A_CALIB
+    if B is None: B = const.B_CALIB
 
-    denom = A * lap_I + B * It
-    depth_map = lap_I / (denom + eps)
+    lap_I = lap_I.astype(np.float32)
+    It    = It.astype(np.float32)
 
-    depth_map[depth_map < 0] = 0
-    return depth_map.astype(np.float32)
+    V = lap_I
+    W = A * lap_I + B * It
+
+    k = (window, window)
+    VW = cv2.boxFilter(V * W, ddepth=-1, ksize=k, normalize=False, borderType=cv2.BORDER_REFLECT)
+    W2 = cv2.boxFilter(W * W, ddepth=-1, ksize=k, normalize=False, borderType=cv2.BORDER_REFLECT)
+
+    Z = VW / (W2 + EPS)
+    return Z

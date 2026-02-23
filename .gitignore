@@ -1,0 +1,5 @@
+*.pkl
+*.png
+*.pdf
+*.docx
+.DS_Store
