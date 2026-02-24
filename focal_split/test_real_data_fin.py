@@ -17,13 +17,35 @@ def removeLowFreqInfo(img: np.ndarray, ksize: int = 21) -> np.ndarray:
     return img - bias
 
 def compute_confidence(It: np.ndarray) -> np.ndarray:
-    """Professor's confidence: |It|^2"""
+    """
+    Professor's confidence for MASKING: |It|^2
+    Returns raw It^2 values (not normalized)
+    """
     conf = It ** 2
-    denom = conf.max() - conf.min()
-    if denom == 0:
-        denom = 1e-8
-    conf_norm = (conf - conf.min()) / denom
-    return np.power(conf_norm, 0.5)
+    return conf
+
+def compute_confidence_display(It: np.ndarray) -> np.ndarray:
+    """
+    Professor's confidence VISUALIZATION (matching C++ code exactly)
+    Range: 5e-7 to 1e-2, clamped, then inverted
+    """
+    I_s_t2 = It ** 2
+    
+    # Professor's exact normalization (from const)
+    min_val = const.CONF_VIS_MIN  # 5e-7
+    max_val = const.CONF_VIS_MAX  # 1e-2
+    
+    # Normalize
+    I_s_t2_vis = (I_s_t2 - min_val) / (max_val - min_val) * 255.0
+    
+    # Clamp to [0, 255]
+    I_s_t2_vis = np.clip(I_s_t2_vis, 0, 255).astype(np.uint8)
+    
+    # Invert (professor uses bitwise_not)
+    I_s_t2_vis = 255 - I_s_t2_vis
+    
+    # Normalize to [0, 1] for matplotlib
+    return I_s_t2_vis.astype(np.float32) / 255.0
 
 def run_paper_visual_final(file_pattern="test*.png"):
     pairs = []
@@ -46,7 +68,7 @@ def run_paper_visual_final(file_pattern="test*.png"):
     
     if rows == 1: axes = [axes]
     
-    VMIN, VMAX = const.DEPTH_MIN, const.DEPTH_MAX  # 0.4~1.0m from professor's code! 
+    VMIN, VMAX = const.DEPTH_MIN, const.DEPTH_MAX
     
     # Create toggle directory
     toggle_dir = "toggle_comparison"
@@ -54,10 +76,12 @@ def run_paper_visual_final(file_pattern="test*.png"):
     
     print(f"\n{'='*60}")
     print(f"Processing {num_pairs} image pairs")
-    print(f"Using Professor's EXACT Settings:")
+    print(f"Using Professor's EXACT Implementation:")
     print(f"  A={const.A_CALIB:.4f}, B={const.B_CALIB:.4f}")
     print(f"  Depth Range: {const.DEPTH_MIN}m ~ {const.DEPTH_MAX}m")
-    print(f"  Invalid pixels: WHITE (like professor)")
+    print(f"  Confidence Threshold: It^2 > 0.00001 (professor's C++ value)")
+    print(f"  Confidence Display: 5e-7 ~ 1e-2 range, inverted")
+    print(f"  Invalid pixels: WHITE")
     print(f"Toggle images will be saved in: {toggle_dir}/")
     print(f"{'='*60}\n")
     
@@ -70,18 +94,18 @@ def run_paper_visual_final(file_pattern="test*.png"):
         I1_rgb = cv2.cvtColor(I1_bgr, cv2.COLOR_BGR2RGB)
         I2_rgb = cv2.cvtColor(I2_bgr, cv2.COLOR_BGR2RGB)
         
-        # ===== SIFT Alignment (원본 그대로 - 이미 잘 됨!) =====
+        # SIFT Alignment
         I1_gray = cv2.cvtColor(I1_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
         I2_gray = cv2.cvtColor(I2_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
         
         I1_aligned_gray, I2_aligned_gray, H = util.align_images(I1_gray, I2_gray, debug=(idx==0))
         
-        # RGB warping + Consistent cropping (원본 그대로 - 이미 잘 됨!)
+        # RGB warping + Consistent cropping
         if H is not None:
             h, w = I1_rgb.shape[:2]
             I2_aligned_rgb = cv2.warpPerspective(I2_rgb, H, (w, h))
             
-            # Crop (원본 그대로)
+            # Crop
             left_crop = 0
             right_crop = 65
             top_crop = 0
@@ -108,7 +132,7 @@ def run_paper_visual_final(file_pattern="test*.png"):
             I1_gray_crop = I1_gray[crop:-crop, crop:-crop]
             I2_gray_crop = I2_gray[crop:-crop, crop:-crop]
         
-        # ===== Save toggle comparison images =====
+        # Save toggle comparison images
         basename = os.path.splitext(os.path.basename(f1_path))[0]
         
         img1_path = os.path.join(toggle_dir, f"{basename}_1_img1.png")
@@ -119,9 +143,7 @@ def run_paper_visual_final(file_pattern="test*.png"):
         
         print(f"  [Saved toggle] {basename}_1_img1.png & {basename}_2_aligned.png")
         
-        # ===== 여기부터 교수님 방식으로 교체! =====
-        
-        # Professor's preprocessing (aberration correction + noise attenuation)
+        # Professor's preprocessing
         I1_proc = removeLowFreqInfo(I1_gray_crop, const.HIGHPASS_SIZE)
         I2_proc = removeLowFreqInfo(I2_gray_crop, const.HIGHPASS_SIZE)
         
@@ -137,7 +159,7 @@ def run_paper_visual_final(file_pattern="test*.png"):
         V = Laplacian_I
         W = const.A_CALIB * Laplacian_I + const.B_CALIB * I_s_t
         
-        # Spatial aggregation (scipy convolution)
+        # Spatial aggregation
         kernel = np.ones((const.WINDOW_SIZE, 1))
         VW = signal.convolve2d(V * W, kernel, "same", "symm")
         VW = signal.convolve2d(VW, kernel.T, "same", "symm")
@@ -146,19 +168,21 @@ def run_paper_visual_final(file_pattern="test*.png"):
         
         depth_map = np.divide(VW, W2 + 1e-10, where=(W2 != 0))
         
-        # Professor's confidence
-        conf_map = compute_confidence(I_s_t)
+        # Confidence for MASKING (raw It^2)
+        conf_mask = compute_confidence(I_s_t)
         
-        # ===== Professor's masking approach =====
-        # Valid range mask
+        # Confidence for DISPLAY (professor's exact visualization)
+        conf_map_display = compute_confidence_display(I_s_t)
+        
+        # Professor's very low threshold (from C++ code)
         valid_mask = (
-            (conf_map > 0.15) &
+            (conf_mask > const.CONF_THRESHOLD) &  # It^2 > 0.00001
             (depth_map >= VMIN) & 
             (depth_map <= VMAX) &
             np.isfinite(depth_map)
         )
         
-        # Clamp depth to range (like professor's cv::max/cv::min)
+        # Clamp depth to range
         depth_clamped = np.clip(depth_map, VMIN, VMAX)
         
         # Normalize to 0-1 for colormap
@@ -168,42 +192,40 @@ def run_paper_visual_final(file_pattern="test*.png"):
         vis_depth = plt.cm.jet(depth_norm)  # RGBA
         vis_depth = (vis_depth[:, :, :3] * 255).astype(np.uint8)  # RGB only
         
-        # Set invalid pixels to WHITE (like professor)
+        # Set invalid pixels to WHITE
         vis_depth[~valid_mask] = [255, 255, 255]
         
-        # Convert to format for imshow
         vis_depth_final = vis_depth
         
-        # Visualization (원본 그대로)
+        # Visualization
         ax_row = axes[idx] if rows > 1 else axes[0]
         
-        # Column 1: I1 (cropped)
+        # Column 1: I1
         ax_row[0].imshow(I1_rgb_crop)
         ax_row[0].set_title("Image 1 (Far)", fontsize=11)
         ax_row[0].axis('off')
         
-        # Column 2: I2 (cropped to same region)
+        # Column 2: I2
         ax_row[1].imshow(I2_rgb_crop)
         ax_row[1].set_title("Image 2 (Near)", fontsize=11)
         ax_row[1].axis('off')
         
-        # Column 3: Aligned I2 (cropped)
+        # Column 3: Aligned I2
         ax_row[2].imshow(I2_aligned_crop)
         ax_row[2].set_title("Aligned Image 2", fontsize=11, color='blue')
         ax_row[2].axis('off')
         
-        # Column 4: Confidence Map
-        ax_row[3].imshow(conf_map, cmap='gray')
+        # Column 4: Confidence Map (professor's exact visualization - already inverted!)
+        ax_row[3].imshow(conf_map_display, cmap='gray', vmin=0, vmax=1)
         ax_row[3].set_title("Confidence Map", fontsize=11)
         ax_row[3].axis('off')
         
-        # Column 5: Predicted Depth (already RGB colored)
+        # Column 5: Predicted Depth
         ax_row[4].imshow(vis_depth_final)
-        ax_row[4].set_title("Predicted Depth\n(Professor's Method)", fontsize=11, fontweight='bold')
+        ax_row[4].set_title("Predicted Depth\n(Calibrated)", fontsize=11, fontweight='bold')
         ax_row[4].axis('off')
         
-        # Column 6: Colorbar (manual since we pre-colored)
-        # Create a dummy mappable for colorbar
+        # Column 6: Colorbar
         import matplotlib.cm as cm
         from matplotlib.colors import Normalize
         norm = Normalize(vmin=VMIN, vmax=VMAX)
@@ -216,17 +238,20 @@ def run_paper_visual_final(file_pattern="test*.png"):
         cbar.set_ticklabels([f'{VMIN}m\n(Near)', f'{(VMIN+VMAX)/2:.1f}m', f'{VMAX}m\n(Far)'])
     
     plt.tight_layout()
-    output_filename = "paper_final_result_professor_exact_match.png"
+    output_filename = "paper_final_result_professor_exact.png"
     plt.savefig(output_filename, dpi=150)
     plt.close()
     
     print(f"\n{'='*60}")
-    print(f"COMPLETE! Results match professor's C++ implementation:")
+    print(f"COMPLETE! Professor's EXACT implementation:")
     print(f"  Main result: {output_filename}")
     print(f"  Toggle images: {toggle_dir}/")
-    print(f"  - Depth range: {const.DEPTH_MIN}~{const.DEPTH_MAX}m (0.4-1.0m)")
-    print(f"  - Invalid pixels shown as WHITE")
+    print(f"Settings:")
     print(f"  - A={const.A_CALIB}, B={const.B_CALIB}")
+    print(f"  - Depth range: {const.DEPTH_MIN}~{const.DEPTH_MAX}m")
+    print(f"  - Confidence: It^2 > 0.00001 (professor's C++ threshold)")
+    print(f"  - Confidence display: 5e-7~1e-2 range, inverted (white bg)")
+    print(f"  - Invalid pixels: WHITE")
     print(f"{'='*60}\n")
 
 if __name__ == "__main__":

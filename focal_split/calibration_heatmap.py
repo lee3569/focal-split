@@ -1,11 +1,20 @@
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.colors import LogNorm
+from scipy import signal
 
 import util
 import imaging
 import oper
+
+def removeLowFreqInfo(img: np.ndarray, ksize: int = 21) -> np.ndarray:
+    """
+    Professor's high-pass filter: subtract box-filtered version
+    """
+    kernel = np.ones((ksize, ksize), dtype=np.float32)
+    kernel /= np.sum(kernel)
+    bias = signal.fftconvolve(img, kernel, "same")
+    return img - bias
 
 def compute_confidence(I_t: np.ndarray) -> np.ndarray:
     """Confidence based on |I_t|^2"""
@@ -19,7 +28,7 @@ def filter_by_confidence(
     confidence_level: float = 0.95,
     working_range: tuple = (0.3, 1.5)
 ) -> np.ndarray:
-    """교수님의 filterResultByConfidence"""
+    """Filter depth estimates by confidence"""
     Z_flat = Z_array.flatten()
     C_flat = Z_confidence.flatten()
     
@@ -47,6 +56,8 @@ def filter_by_confidence(
 def generate_heatmap_with_ab(A_test, B_test, max_samples=50, save_path="heatmap.png"):
     """
     Generate FocalTrack-style heatmap: True Depth vs Estimated Depth
+    
+    Calibration dataset is already aligned, so we skip SIFT alignment.
     """
     print(f"\n{'='*60}")
     print(f"Testing A={A_test:.4f}, B={B_test:.4f}")
@@ -63,45 +74,50 @@ def generate_heatmap_with_ab(A_test, B_test, max_samples=50, save_path="heatmap.
         try:
             I1_rgb, I2_rgb, Z_true = util.dataset_sample_to_images_and_depth(sample)
             
-            # Preprocessing (논문 방식)
-            I1 = imaging.to_gray(I1_rgb)
-            I2 = imaging.to_gray(I2_rgb)
-            I1 = imaging.aberration_correction(I1, K=21)
-            I2 = imaging.aberration_correction(I2, K=21)
-            I1 = imaging.noise_attenuation(I1, sigma=11.0)
-            I2 = imaging.noise_attenuation(I2, sigma=11.0)
+            # Professor's preprocessing
+            I1 = cv2.cvtColor(I1_rgb, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            I2 = cv2.cvtColor(I2_rgb, cv2.COLOR_BGR2GRAY).astype(np.float32)
             
-            # Alignment
-            I1_aligned, I2_aligned, H = util.align_images(I1, I2)
-            if H is None:
-                continue
+            # High-pass filter (remove low frequency)
+            I1 = removeLowFreqInfo(I1, 21)
+            I2 = removeLowFreqInfo(I2, 21)
             
-            # Crop
+            # Denoise
+            I1 = cv2.GaussianBlur(I1, (11, 11), 0)
+            I2 = cv2.GaussianBlur(I2, (11, 11), 0)
+            
+            # Simple crop (remove edges)
             crop = 50
-            I1_crop = I1_aligned[crop:-crop, crop:-crop]
-            I2_crop = I2_aligned[crop:-crop, crop:-crop]
+            I1_crop = I1[crop:-crop, crop:-crop]
+            I2_crop = I2[crop:-crop, crop:-crop]
             
-            # Derivatives (교수님 코드처럼 Gaussian smoothing)
-            lap_I, It = oper.compute_laplacian_and_It(I1_crop, I2_crop)
+            # Professor's Laplacian (difference of Gaussians)
+            img_avg = (I1_crop + I2_crop) / 2
+            Laplacian_I = img_avg - cv2.GaussianBlur(img_avg, (11, 11), 0)
+            I_s_t = (I1_crop - I2_crop) / 2
             
-            # FocalTrack depth estimation
-            WINDOW = 21
-            V = lap_I                    # alpha=1로 normalize
-            W = A_test * lap_I + B_test * It
+            # Professor's depth formula
+            V = Laplacian_I
+            W = A_test * Laplacian_I + B_test * I_s_t
             
-            num_blur = cv2.boxFilter(V * W, -1, (WINDOW, WINDOW))
-            den_blur = cv2.boxFilter(W**2, -1, (WINDOW, WINDOW))
-            Z_pred = np.divide(num_blur, den_blur + 1e-10)
+            # Spatial aggregation (professor's method)
+            kernelSize = 21
+            kernel = np.ones((kernelSize, 1))
+            VW = signal.convolve2d(V * W, kernel, "same", "symm")
+            VW = signal.convolve2d(VW, kernel.T, "same", "symm")
+            W2 = signal.convolve2d(W**2, kernel, "same", "symm")
+            W2 = signal.convolve2d(W2, kernel.T, "same", "symm")
+            Z_pred = np.divide(VW, W2 + 1e-10, where=(W2 != 0))
             
             # Confidence
-            confidence = compute_confidence(It)
+            confidence = compute_confidence(I_s_t)
             
-            # Filter
+            # Filter by confidence (professor uses 0.95)
             Z_filtered = filter_by_confidence(
                 Z_pred, 
                 confidence, 
                 confidence_level=0.95,
-                working_range=(0.3, 1.5)
+                working_range=(0.0, 2.5)
             )
             
             if len(Z_filtered) > 0:
@@ -118,53 +134,49 @@ def generate_heatmap_with_ab(A_test, B_test, max_samples=50, save_path="heatmap.
     print(f"\nTotal valid pixels: {len(all_Z_true)}")
     
     if len(all_Z_true) < 100:
-        print("[Warning] Too few valid pixels!")
+        print("[Warning] Too few valid pixels for heatmap!")
         return
     
-    # Create heatmap (교수님 스타일)
-    fig, ax = plt.subplots(figsize=(10, 10), dpi=100)
+    # ===== Use professor's plotting code exactly =====
+    fig = plt.figure(figsize=(10, 10), dpi=100)
+    ax = fig.add_subplot(1, 1, 1)
     
+    # Histogram (professor uses 40 bins)
+    HEATMAP_RANGE = [[0.0, 2.5], [0.0, 2.5]]
     heatmap, xedges, yedges = np.histogram2d(
         all_Z_true,
         all_Z_pred,
-        bins=50,
-        range=[[0.3, 1.5], [0.3, 1.5]]
+        bins=40,
+        range=HEATMAP_RANGE
     )
-    
     heatmap = heatmap.T
     extent = [xedges[0], xedges[-1], yedges[0], yedges[-1]]
     
-    # Log scale colormap
-    im = ax.imshow(
-        heatmap, 
-        extent=extent, 
-        origin='lower',
-        cmap='viridis',
-        norm=LogNorm(vmin=max(1, heatmap[heatmap > 0].min()), vmax=heatmap.max()),
-        aspect='auto'
-    )
+    # Linear scale (NO LogNorm like professor's code!)
+    plot_heatmap = ax.imshow(heatmap, extent=extent, origin="lower")
+    fig.colorbar(plot_heatmap, ax=ax, fraction=0.046, pad=0.04)
     
-    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    cbar.set_label('Pixel Count (log scale)', fontsize=12)
+    ax.set_xlabel("True Depth (m)")
+    ax.set_ylabel("Estimated Depth (m)")
+    ax.set_title(f"FocalTrack: A={A_test:.4f}, B={B_test:.4f}")
+    ax.grid()
     
-    # Ideal line
-    ax.plot([0.3, 1.5], [0.3, 1.5], 'w--', linewidth=2, label='Ideal (y=x)')
-    
-    ax.set_xlabel('True Depth (m)', fontsize=14)
-    ax.set_ylabel('Estimated Depth (m)', fontsize=14)
-    ax.set_title(f'FocalTrack: A={A_test:.4f}, B={B_test:.4f}', fontsize=16)
-    ax.legend(loc='upper left', fontsize=12)
-    ax.grid(True, alpha=0.3, color='white', linewidth=0.5)
-    
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150)
-    plt.close()
+    fig.tight_layout()
+    plt.savefig(save_path)
+    plt.close(fig)
     
     print(f"Saved: {save_path}\n")
 
 if __name__ == "__main__":
-    # Test current values
-    generate_heatmap_with_ab(A_test=1.08, B_test=0.82, max_samples=50)
+    # Test professor's values and nearby
+    test_values = [
+        (1.23, 0.19),  # Professor's exact values
+        (1.20, 0.20),
+        (1.15, 0.25),
+        (1.10, 0.30),
+        (1.00, 0.40),
+    ]
     
-    # Test other values
-    # generate_heatmap_with_ab(A_test=1.20, B_test=0.80, max_samples=50, save_path="heatmap_A1.20_B0.80.png")
+    for A, B in test_values:
+        save_path = f"heatmap_A{A:.2f}_B{B:.2f}.png"
+        generate_heatmap_with_ab(A_test=A, B_test=B, max_samples=None, save_path=save_path)

@@ -12,19 +12,23 @@ SENSOR_HEIGHT = 1080
 S1 = 33.0e-3     # s1: sensor distance for I1
 S2 = 36.0e-3     # s2: sensor distance for I2 (0.4mm difference)
 S_CONSENSUS = (S1 + S2) / 2.0   # c: consensus sensor location (Eq. 6)
+DELTA_S = S2 - S1     # 0.003m = 3mm
 
 # Calibrated depth coefficients (fitted to Eq. 11)
 # Z(x) = a / ( b + I_s(x;s) / ∇²I(x;s) )
 # A_CALIB = 1.080831
 # B_CALIB = 0.815744
-A_CALIB = 1.060953
-B_CALIB = 0.755116
+A_CALIB = 1.1
+B_CALIB = 0.3
 # A_CALIB = 1.080831
 # B_CALIB = 0.815744
 
 # (히트맵/클립 범위는 네 실험 범위에 맞춰 조정)
 WORKING_RANGE_MIN = 0.1
 WORKING_RANGE_MAX = 2.1
+
+WINDOW_SIZE = 21      # Spatial aggregation window
+CROP_DEFAULT = 50     # Border crop size
 
 # Dataset path (Luo untethered snapshot dataset)
 ROOT_DIR      = os.path.dirname(os.path.abspath(__file__))

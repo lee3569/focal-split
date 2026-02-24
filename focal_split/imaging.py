@@ -16,3 +16,22 @@ def highpass_filter(img: np.ndarray, ksize: int = 31) -> np.ndarray:
     bias = uniform_filter(img, size=ksize, mode="reflect")
     I_clean = img - bias
     return I_clean
+
+def aberration_correction(img: np.ndarray, K: int = 21) -> np.ndarray:
+    """
+    Paper Eq. 16: Remove non-uniform background lighting
+    
+    I_bck = I - BoxFilter(I)
+    """
+    box_filtered = cv2.boxFilter(img, -1, (K, K), normalize=True)
+    I_bck = img - box_filtered
+    return I_bck
+
+def noise_attenuation(img: np.ndarray, sigma: float = 11.0) -> np.ndarray:
+    """
+    Paper Eq. 17: Gaussian smoothing to suppress sensor noise
+    
+    I_clean = GaussianBlur(I_bck, sigma)
+    """
+    I_clean = cv2.GaussianBlur(img, (0, 0), sigmaX=sigma, sigmaY=sigma)
+    return I_clean
