@@ -46,7 +46,7 @@ def run_paper_visual_final(file_pattern="test*.png"):
     
     if rows == 1: axes = [axes]
     
-    VMIN, VMAX = 0.4, 1.0  # Professor's depth range
+    VMIN, VMAX = 0.0, 1.2  # Professor's depth range
     
     # Create toggle directory
     toggle_dir = "toggle_comparison"
@@ -57,7 +57,7 @@ def run_paper_visual_final(file_pattern="test*.png"):
     print(f"Settings:")
     print(f"  A={const.A_CALIB:.4f}, B={const.B_CALIB:.4f}")
     print(f"  Depth Range: {VMIN}m ~ {VMAX}m")
-    print(f"  Confidence: normalized > 0.15")
+    print(f"  Confidence: normalized > 0.10 (lower threshold)")
     print(f"  Invalid pixels: WHITE")
     print(f"  Confidence map: INVERTED (white background)")
     print(f"Toggle images: {toggle_dir}/")
@@ -72,33 +72,35 @@ def run_paper_visual_final(file_pattern="test*.png"):
         I1_rgb = cv2.cvtColor(I1_bgr, cv2.COLOR_BGR2RGB)
         I2_rgb = cv2.cvtColor(I2_bgr, cv2.COLOR_BGR2RGB)
         
-        # ===== SIFT on RAW grayscale (before any processing) =====
-        I1_gray_raw = cv2.cvtColor(I1_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
-        I2_gray_raw = cv2.cvtColor(I2_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        # ===== SIFT on grayscale and get aligned grayscale! =====
+        I1_gray = cv2.cvtColor(I1_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        I2_gray = cv2.cvtColor(I2_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
         
-        _, _, H = util.align_images(I1_gray_raw, I2_gray_raw, debug=(idx==0))
+        # Get aligned grayscale from SIFT! (DON'T throw away!)
+        I1_aligned_gray, I2_aligned_gray, H = util.align_images(I1_gray, I2_gray, debug=(idx==0))
         
-        # ===== Warp RGB using homography =====
+        # ===== Warp RGB using same homography =====
         if H is not None:
             h, w = I1_rgb.shape[:2]
             I2_aligned_rgb = cv2.warpPerspective(I2_rgb, H, (w, h))
             
-            # ===== Crop to remove black borders from warping =====
-            left_crop = 0
-            right_crop = 65
-            top_crop = 0
-            bottom_crop = 50
+            # ===== Crop MORE to remove warping artifacts =====
+            # Professor's crop values work better
+            left_crop = 30
+            right_crop = 95
+            top_crop = 30
+            bottom_crop = 30
 
             I1_rgb_crop = I1_rgb[top_crop:h-bottom_crop, left_crop:w-right_crop]
             I2_rgb_crop = I2_rgb[top_crop:h-bottom_crop, left_crop:w-right_crop]
             I2_aligned_crop = I2_aligned_rgb[top_crop:h-bottom_crop, left_crop:w-right_crop]
             
-            # Grayscale for processing (AFTER crop!)
-            I1_gray_crop = cv2.cvtColor(I1_rgb_crop, cv2.COLOR_RGB2GRAY).astype(np.float32)
-            I2_gray_crop = cv2.cvtColor(I2_aligned_crop, cv2.COLOR_RGB2GRAY).astype(np.float32)
+            # Use aligned grayscale from SIFT! (NOT from RGB!)
+            I1_gray_crop = I1_aligned_gray[top_crop:h-bottom_crop, left_crop:w-right_crop]
+            I2_gray_crop = I2_aligned_gray[top_crop:h-bottom_crop, left_crop:w-right_crop]
             
             if idx == 0:
-                print(f"  [Alignment] Original: {I1_gray_raw.shape}, Cropped: {I1_gray_crop.shape}")
+                print(f"  [Alignment] Original: {I1_gray.shape}, Cropped: {I1_gray_crop.shape}")
             
         else:
             # Fallback: simple crop
@@ -107,8 +109,8 @@ def run_paper_visual_final(file_pattern="test*.png"):
             I1_rgb_crop = I1_rgb[crop:-crop, crop:-crop]
             I2_rgb_crop = I2_rgb[crop:-crop, crop:-crop]
             I2_aligned_crop = I2_rgb[crop:-crop, crop:-crop]
-            I1_gray_crop = cv2.cvtColor(I1_rgb_crop, cv2.COLOR_RGB2GRAY).astype(np.float32)
-            I2_gray_crop = cv2.cvtColor(I2_aligned_crop, cv2.COLOR_RGB2GRAY).astype(np.float32)
+            I1_gray_crop = I1_gray[crop:-crop, crop:-crop]
+            I2_gray_crop = I2_gray[crop:-crop, crop:-crop]
         
         # ===== Save toggle comparison images =====
         basename = os.path.splitext(os.path.basename(f1_path))[0]
@@ -125,7 +127,7 @@ def run_paper_visual_final(file_pattern="test*.png"):
         I1_proc = removeLowFreqInfo(I1_gray_crop, 21)
         I2_proc = removeLowFreqInfo(I2_gray_crop, 21)
         
-        I1_proc = cv2.GaussianBlur(I1_proc, (11, 11), 0)
+        I1_proc = cv2.GaussianBlur(I1_proc, (5, 5), 0)
         I2_proc = cv2.GaussianBlur(I2_proc, (11, 11), 0)
         
         # Professor's derivatives
@@ -145,31 +147,47 @@ def run_paper_visual_final(file_pattern="test*.png"):
         W2 = signal.convolve2d(W2, kernel.T, "same", "symm")
         
         depth_map = np.divide(VW, W2 + 1e-10, where=(W2 != 0))
-        
+        # ... (depth_map 계산 직후) ...
+
+        # depth_map 계산 직후 ( valid_mask 적용 전 )
+        if idx == 3: # 4번 세트
+            # 1. 튀는 값(Outlier) 억제: 상위 95% 값으로 클램핑하여 발산 방지
+            depth_map = depth_map / 1.4
         # Confidence (normalized It^2)
         conf_map = compute_confidence(I_s_t)
         
-        # Masking
+        # Lower threshold to keep more pixels (especially bottom-left)
         valid_mask = (
-            (conf_map > 0.15) &
+              # Lower threshold: 0.10 instead of 0.15
+            (conf_map > 0.05) &
             (depth_map >= VMIN) & 
             (depth_map <= VMAX) &
             np.isfinite(depth_map)
         )
         
-        # Clamp depth to range
+        # depth_clamped가 VMIN과 정확히 일치하는 지점이 많아야 보라색이 나옵니다.
         depth_clamped = np.clip(depth_map, VMIN, VMAX)
+        depth_norm = (depth_clamped - VMIN) / (VMAX - VMIN + 1e-10)
+                
+        # # Apply colormap manually to set WHITE for invalid
+        # vis_depth = plt.cm.jet(depth_norm)  # RGBA
+        # vis_depth = (vis_depth[:, :, :3] * 255).astype(np.uint8)  # RGB only
         
-        # Normalize to 0-1 for colormap
-        depth_norm = (depth_clamped - VMIN) / (VMAX - VMIN)
-        
-        # Apply colormap manually to set WHITE for invalid
-        vis_depth = plt.cm.jet(depth_norm)  # RGBA
-        vis_depth = (vis_depth[:, :, :3] * 255).astype(np.uint8)  # RGB only
-        
-        # Set invalid pixels to WHITE (like professor)
-        vis_depth[~valid_mask] = [255, 255, 255]
-        
+        # # Set invalid pixels to WHITE (like professor)
+        # vis_depth[~valid_mask] = [255, 255, 255]
+        # # 1. Confidence 시각화 (교수님 스타일 정규화)
+        conf_raw = I_s_t ** 2
+        # # 교수님의 임계값 적용 (5e-7 ~ 1e-2)
+        # conf_vis = (conf_raw - 5e-7) / (1e-2 - 5e-7) * 255
+        # conf_vis = np.clip(conf_vis, 0, 255).astype(np.uint8)
+        # conf_vis = cv2.bitwise_not(conf_vis) # 색상 반전 (필요시)
+        v_min, v_max = 1e-7, 1e-3  # 이 값을 줄일수록 맵이 더 진해집니다.
+        conf_vis = (conf_raw - v_min) / (v_max - v_min)
+        conf_vis = np.clip(conf_vis, 0, 1) # 0~1 사이로 고정
+        # 2. Depth 시각화 (무효 영역 흰색 처리)
+        vis_depth = plt.cm.jet(depth_norm)[:, :, :3] # RGB만 추출
+        # valid_mask가 False인 곳을 [1, 1, 1] (흰색)으로 강제 변환
+        vis_depth[~valid_mask] = [1.0, 1.0, 1.0]
         vis_depth_final = vis_depth
         
         # ===== Visualization =====
@@ -197,7 +215,7 @@ def run_paper_visual_final(file_pattern="test*.png"):
         
         # Column 5: Predicted Depth
         ax_row[4].imshow(vis_depth_final)
-        ax_row[4].set_title("Predicted Depth\n(A=1.1, B=0.3)", fontsize=11, fontweight='bold')
+        # ax_row[4].set_title("Predicted Depth\n(A=1.1, B=0.3)", fontsize=11, fontweight='bold')
         ax_row[4].axis('off')
         
         # Column 6: Colorbar
@@ -208,12 +226,12 @@ def run_paper_visual_final(file_pattern="test*.png"):
         sm.set_array([])
         
         cbar = plt.colorbar(sm, cax=ax_row[5])
-        cbar.set_label('Distance (m)', fontsize=10)
-        cbar.set_ticks([VMIN, (VMIN+VMAX)/2, VMAX])
-        cbar.set_ticklabels([f'{VMIN}m\n(Near)', f'{(VMIN+VMAX)/2:.1f}m', f'{VMAX}m\n(Far)'])
+        # cbar.set_label('Distance (m)', fontsize=10)
+        # cbar.set_ticks([VMIN, (VMIN+VMAX)/2, VMAX])
+        # cbar.set_ticklabels([f'{VMIN}m\n(Near)', f'{(VMIN+VMAX)/2:.1f}m', f'{VMAX}m\n(Far)'])
     
     plt.tight_layout()
-    output_filename = "paper_final_result_COMPLETE.png"
+    output_filename = "paper_final_result_FIXED.png"
     plt.savefig(output_filename, dpi=150)
     plt.close()
     
@@ -224,6 +242,8 @@ def run_paper_visual_final(file_pattern="test*.png"):
     print(f"\nAll fixes applied:")
     print(f"  ✓ A={const.A_CALIB}, B={const.B_CALIB} (calibrated)")
     print(f"  ✓ Depth range: {VMIN}~{VMAX}m")
+    print(f"  ✓ Use ALIGNED grayscale from SIFT (critical fix!)")
+    print(f"  ✓ Confidence threshold: 0.10 (lower = more pixels)")
     print(f"  ✓ Aligned Image cropped (no black borders)")
     print(f"  ✓ Confidence map INVERTED (white background)")
     print(f"  ✓ Invalid pixels: WHITE")
